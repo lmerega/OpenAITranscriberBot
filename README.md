@@ -1,6 +1,3 @@
-# Welcome to StackEdit!
-
-
 # Telegram Audio Transcription Bot
 
 ## Description
