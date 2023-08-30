@@ -1,4 +1,11 @@
 {
-    "openai_api_key": "your_openai_api_key_here",
-    "bot_token": "your_telegram_bot_token_here"
+    "openai_api_key": "your_key",
+     "encryption_key": "see_readme_to_generate_one",
+    "db_config" : {
+        "user": "user",
+        "password": "password",
+        "host": "myhost",
+        "database" : "mydb",
+        "raise_on_warnings": true    
+    }
 }
