@@ -13,8 +13,8 @@ logging.basicConfig(level=logging.DEBUG,
                     handlers=[logging.StreamHandler(),
                               logging.FileHandler('app.log', encoding='utf-8')])
 
-language = None
-current_openai_key = None
+logger = logging.getLogger(__name__)
+from cryptography.fernet import Fernet
 
 languages = {
     "English": "en",
@@ -24,17 +24,17 @@ languages = {
     "Deutsch": "de"
 }
 
-logger = logging.getLogger(__name__)
-from cryptography.fernet import Fernet
+try:
+    with open('languages.json', 'r') as lang_file:
+        lang_resources = json.load(lang_file)
+        phrases = lang_resources['phrases']
+except Exception as e:
+    logger.error("Error reading languages.json: %s", e)
 
 with open('config.json', 'r') as config_file:
     config = json.load(config_file)
     cipher = Fernet(config['encryption_key'])
     db_config = config['db_config']
-
-
-with open('languages.json') as lang_file:
-    lang_resources = json.load(lang_file)    
 
 #openai.api_key = config['openai_api_key']
 bot_token = config['bot_token'] 
@@ -47,21 +47,17 @@ except Exception as e:
     logger.error("%s %s", "Bot connection error: ", e)
 
 def encrypt_data(data):
-    encrypted_data = cipher.encrypt(data.encode())
-    return encrypted_data
+    try:
+        encrypted_data = cipher.encrypt(data.encode())
+        return encrypted_data
+    except Exception as e:
+        logger.error("Error encrypting data: %s", e)
 
 def decrypt_data(encrypted_data):
     decrypted_data = cipher.decrypt(encrypted_data).decode()
     return decrypted_data
 
-def has_valid_api_key(chat_id):
-    if current_openai_key:
-        return is_valid_openai_key(current_openai_key)
-    api_key = get_api_key_from_db(chat_id)
-    return is_valid_openai_key(api_key)
-
 def get_api_key_from_db(chat_id):
-    global current_openai_key
     cnx = mysql.connector.connect(**db_config)
     cursor = cnx.cursor()
     cursor.execute("SELECT encrypted_openai_api_key FROM users WHERE chat_id = %s", (chat_id,))
@@ -73,7 +69,6 @@ def get_api_key_from_db(chat_id):
         return None
 
     decrypted_key = decrypt_data(encrypted_api_key[0])
-    current_openai_key = decrypted_key 
     return decrypted_key
 
 def store_api_key_in_db(chat_id, api_key):
@@ -91,7 +86,7 @@ def store_provided_key(message):
     bot.clear_step_handler_by_chat_id(chat_id=chat_id)  
 
     api_key = message.text
-    if message.text == "NO":
+    if message.text.upper() == "NO":
         bot.clear_step_handler_by_chat_id(chat_id=chat_id)
         bot.send_message(chat_id, operation_cancelled)
         return    
@@ -166,30 +161,41 @@ def store_language_in_db(chat_id, lang):
     cursor.close()
     cnx.close()
 
+def insert_interaction_into_db(chat_id):   
+    logger.info ("%s %s", "ChatID: ", chat_id)
+    cnx = mysql.connector.connect(**db_config)
+    cursor = cnx.cursor()
+    cursor.execute("INSERT INTO interactions (ChatID) VALUES (%s)", (chat_id,))
+    cnx.commit()
+    cursor.close()
+    cnx.close()     
+
 def load_language_resources(lang):
     global phrases, system_prompt, welcome_message, help_message, recognition_started, transcription_error
-    global bot_connected_message, bot_connection_error, provide_api_key, invalid_api_key, key_stored
+    global provide_api_key, invalid_api_key, key_stored
     global key_updated, operation_cancelled, language_choice, language_error, select_lang
 
-    with open('languages.json', 'r') as lang_file:
-        lang_resources = json.load(lang_file)
-        phrases = lang_resources['phrases']
-        system_prompt = lang_resources[lang]['system_prompt']
-        welcome_message = lang_resources[lang]['welcome_message']
-        help_message = lang_resources[lang]['help_message']
-        recognition_started = lang_resources[lang]['recognition_started']
-        transcription_error = lang_resources[lang]['transcription_error']
-        provide_api_key = lang_resources[lang]['provide_api_key']
-        invalid_api_key = lang_resources[lang]['invalid_api_key']
-        key_stored = lang_resources[lang]['key_stored']
-        key_updated = lang_resources[lang]['key_updated']
-        operation_cancelled= lang_resources[lang]['operation_cancelled']
-        language_choice = lang_resources[lang]['language_choice']
-        language_error = lang_resources[lang]['language_error']
-        select_lang = lang_resources[lang]['select_lang']
+    try:
+        with open('languages.json', 'r') as lang_file:
+            lang_resources = json.load(lang_file)
+            phrases = lang_resources['phrases']
+            system_prompt = lang_resources[lang]['system_prompt']
+            welcome_message = lang_resources[lang]['welcome_message']
+            help_message = lang_resources[lang]['help_message']
+            recognition_started = lang_resources[lang]['recognition_started']
+            transcription_error = lang_resources[lang]['transcription_error']
+            provide_api_key = lang_resources[lang]['provide_api_key']
+            invalid_api_key = lang_resources[lang]['invalid_api_key']
+            key_stored = lang_resources[lang]['key_stored']
+            key_updated = lang_resources[lang]['key_updated']
+            operation_cancelled= lang_resources[lang]['operation_cancelled']
+            language_choice = lang_resources[lang]['language_choice']
+            language_error = lang_resources[lang]['language_error']
+            select_lang = lang_resources[lang]['select_lang']        
+    except Exception as e:
+        logger.error("Error reading languages.json: %s", e)
 
 def set_language(message):
-    global language
     chat_id = message.chat.id
     lang_choice = message.text
 
@@ -197,10 +203,8 @@ def set_language(message):
         language = languages[lang_choice]
         store_language_in_db(chat_id, language)
         load_language_resources(language)
-        bot.send_message(chat_id, f"{language_choice} {lang_choice}!")
-
         markup = telebot.types.ReplyKeyboardRemove()
-
+        bot.send_message(chat_id, f"{language_choice} {lang_choice}!", reply_markup=markup)
     else:
         bot.send_message(chat_id, language_error)
         send_language_keyboard(chat_id)
@@ -215,44 +219,32 @@ def send_language_keyboard(chat_id):
 
 @bot.message_handler(commands=["help"])
 def send_help(message):
-    global language
     chat_id = message.chat.id
-    if not language:
-        language = get_language_from_db(chat_id)
-    load_language_resources(language)    
+    current_language = get_language_from_db(chat_id)
+    load_language_resources(current_language)   
     bot.reply_to(
         message, help_message,
     )
 @bot.message_handler(commands=["start"])
 def send_welcome(message):
-    global language
     chat_id = message.chat.id
-    if not language:
-        language = get_language_from_db(chat_id)
-    load_language_resources(language)
+    current_language = get_language_from_db(chat_id)
+    load_language_resources(current_language)
     bot.reply_to(message, welcome_message)
-
-@bot.message_handler(commands=["stop_bot"])
-def stop_bot_handler(message):
-    bot.stop_bot()
 
 @bot.message_handler(commands=["changekey"])
 def change_api_key_command(message):
-    global language
     chat_id = message.chat.id
-    if not language:
-        language = get_language_from_db(chat_id)
-    load_language_resources(language)    
+    current_language = get_language_from_db(chat_id)
+    load_language_resources(current_language)
     bot.send_message(message.chat.id, provide_api_key)
     bot.register_next_step_handler(message, change_api_key_step)
 
 @bot.message_handler(commands=["changelanguage"])
 def change_language_command(message):
-    global language
     chat_id = message.chat.id
-    if not language:
-        language = get_language_from_db(chat_id)
-    load_language_resources(language)    
+    current_language = get_language_from_db(chat_id)
+    load_language_resources(current_language)
     markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     for lang_name in languages:
         markup.add(telebot.types.KeyboardButton(lang_name))
@@ -262,23 +254,21 @@ def change_language_command(message):
 
 @bot.message_handler(content_types=['voice'])
 def get_voice_message(message):
-    global language
     chat_id = message.chat.id
-    if not language:
-        language = get_language_from_db(chat_id)
-    load_language_resources(language) 
-    if current_openai_key is None:
-        api_key = get_api_key_from_db(chat_id)
-        if not has_valid_api_key(chat_id):
-            bot.reply_to(message, provide_api_key)
-            bot.register_next_step_handler(message, store_provided_key)
-            return
-    else:
-        api_key = current_openai_key
-        
+    current_language = get_language_from_db(chat_id)
+    load_language_resources(current_language)
+    api_key = get_api_key_from_db(chat_id)    
+
+    if not is_valid_openai_key(api_key):
+        bot.reply_to(message, invalid_api_key) 
+        bot.register_next_step_handler(message, change_api_key_step) 
+        return
+    insert_interaction_into_db (chat_id)        
+    logger.debug("%s" "%s", "ChatId: ", chat_id)
     file_info = bot.get_file(message.voice.file_id)
     file_path = file_info.file_path
     openai.api_key = api_key
+
     file_url = f'https://api.telegram.org/file/bot{bot_token}/{file_path}'
 
     logger.info('Downloading audio file...')
@@ -292,7 +282,10 @@ def get_voice_message(message):
     sent_message = bot.reply_to(message, recognition_started, parse_mode='Markdown')
     logger.info('Converting audio file in MP3 format...')
     mp3_file_name = f'{str(uuid.uuid4())}.mp3'
-    subprocess.run(['ffmpeg', '-i', file_name, mp3_file_name])
+    try:
+        subprocess.run(['ffmpeg', '-i', file_name, mp3_file_name])
+    except Exception as e:
+        logger.error("Error converting audio file with FFmpeg: %s", e)    
 
     transcript = None
     try:
@@ -316,8 +309,11 @@ def get_voice_message(message):
         bot.edit_message_text(chat_id=message.chat.id, message_id=sent_message.message_id, text=transcription_error)
 
     logger.info('Deleting audio file...')
-    os.remove(file_name)
-    os.remove(mp3_file_name)
+    try:
+        os.remove(file_name)
+        os.remove(mp3_file_name)
+    except OSError as e:
+        logger.error("Error removing file: %s", e)
 
     logger.info("%s %s", 'Original file name:', file_name)
     logger.info("%s %s", 'Converted file name:', mp3_file_name)

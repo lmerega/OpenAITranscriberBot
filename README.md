@@ -8,6 +8,9 @@ Introducing the Telegram Audio Transcription Bot: a cutting-edge solution that u
 
 ## Changelog
 
+- **Version 2.1.0**:
+  - Integrated new DB with event logging.
+  
 - **Version 2.0.0**:
   - Integrated multi-language support with automatic language detection.
   - Introduced new commands: `/changelanguage` allowing users to switch between supported languages and `/changekey` to update OpenAI API keys.
@@ -70,11 +73,23 @@ CREATE DATABASE TranscriptionBotDB;
 
 USE TranscriptionBotDB;
 
-CREATE TABLE Users (
-    user_id INT PRIMARY KEY,
-    openai_api_key_encrypted BLOB NOT NULL,
-    preferred_language VARCHAR(5) NOT NULL DEFAULT 'en'
+	
+CREATE TABLE `users` (
+  `chat_id` bigint NOT NULL,
+  `encrypted_openai_api_key` blob,
+  `language` varchar(5) NOT NULL DEFAULT 'en',
+  `nome_colonna` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`chat_id`),
+  UNIQUE KEY `chat_id` (`chat_id`)
 );
+
+CREATE TABLE `interactions` (
+  `ID` int NOT NULL AUTO_INCREMENT,
+  `ChatID` bigint NOT NULL,
+  `Date` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`ID`)
+);
+
 ```
 
 Note: The `preferred_language` defaults to 'en' (English). Users can adjust this setting through the `/changelanguage` command.
