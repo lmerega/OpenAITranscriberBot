@@ -7,13 +7,26 @@ import uuid
 import json
 import mysql.connector
 import logging
+from logging.handlers import RotatingFileHandler
 
-logging.basicConfig(level=logging.DEBUG,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    handlers=[logging.StreamHandler(),
-                              logging.FileHandler('app.log', encoding='utf-8')])
-
+# Configura il logger
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+# Formattazione per il logger
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+# Crea un handler di rotazione che scrive nei log con un massimo di 10MB per file e mantiene fino a 5 file di backup.
+rotating_handler = RotatingFileHandler('app.log', maxBytes=10*1024*1024, backupCount=5, encoding='utf-8')
+rotating_handler.setFormatter(formatter)
+
+# Crea un handler per la console
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(formatter)
+
+# Aggiungi entrambi gli handler al logger
+logger.addHandler(rotating_handler)
+logger.addHandler(console_handler)
 from cryptography.fernet import Fernet
 
 languages = {
@@ -113,20 +126,48 @@ def remove_phrases(text):
     return text
 
 def generate_corrected_transcript(temperature, system_prompt, audio_file):
-    response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
-        temperature=temperature,
-        messages=[
-            {
-                "role": "system",
-                "content": system_prompt
-            },
-            {
-                "role": "user",
-                "content": audio_file
-            }
-        ]
-    )
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            temperature=temperature,
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": audio_file
+                }
+            ]
+        )
+    except openai.error.InvalidRequestError as e:
+        logger.debug("%s %s", "Error using GPT-4:", e)
+        logger.debug("Trying with GPT-3.5")
+        try:
+            response = openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",
+                temperature=temperature,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": system_prompt
+                    },
+                    {
+                        "role": "user",
+                        "content": audio_file
+                    }
+                ]
+            )
+        except openai.error.OpenAIError as e:
+            logger.debug("%s %s", "Error using GPT-3.5:", e)
+            error_message = f"Error using GPT-3.5: {e}"
+            return error_message
+    except openai.error.OpenAIError as e:
+        logger.debug("%s %s", "Error using API:", e)
+        error_message = f"Error using API: {e}"
+        return error_message        
+
     return response['choices'][0]['message']['content']
 
 def change_api_key_step(message):
