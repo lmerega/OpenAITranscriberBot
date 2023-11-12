@@ -214,7 +214,7 @@ def insert_interaction_into_db(chat_id):
 def load_language_resources(lang):
     global phrases, system_prompt, welcome_message, help_message, recognition_started, transcription_error
     global provide_api_key, invalid_api_key, key_stored
-    global key_updated, operation_cancelled, language_choice, language_error, select_lang
+    global key_updated, operation_cancelled, language_choice, language_error, select_lang, wrong_file_type
 
     try:
         with open('languages.json', 'r') as lang_file:
@@ -232,7 +232,8 @@ def load_language_resources(lang):
             operation_cancelled= lang_resources[lang]['operation_cancelled']
             language_choice = lang_resources[lang]['language_choice']
             language_error = lang_resources[lang]['language_error']
-            select_lang = lang_resources[lang]['select_lang']        
+            select_lang = lang_resources[lang]['select_lang']       
+            wrong_file_type = lang_resources[lang]['wrong_file_type']        
     except Exception as e:
         logger.error("Error reading languages.json: %s", e)
 
@@ -257,6 +258,22 @@ def send_language_keyboard(chat_id):
     
     bot.send_message(chat_id, select_lang, reply_markup=markup)
     bot.register_next_step_handler_by_chat_id(chat_id, set_language)
+
+# Definizione della funzione split_message
+def split_message(message, size=4096):
+    words = message.split()
+    chunks = []
+    current_chunk = words[0]
+
+    for word in words[1:]:
+        if len(current_chunk) + len(word) + 1 <= size:
+            current_chunk += " " + word
+        else:
+            chunks.append(current_chunk)
+            current_chunk = word
+
+    chunks.append(current_chunk)
+    return chunks  
 
 @bot.message_handler(commands=["help"])
 def send_help(message):
@@ -293,23 +310,40 @@ def change_language_command(message):
     bot.register_next_step_handler(message, set_language)
 
 
-@bot.message_handler(content_types=['voice'])
-def get_voice_message(message):
+@bot.message_handler(content_types=['voice', 'audio', 'document'])
+def handle_media_messages(message):
     chat_id = message.chat.id
     current_language = get_language_from_db(chat_id)
     load_language_resources(current_language)
-    api_key = get_api_key_from_db(chat_id)    
+    api_key = get_api_key_from_db(chat_id)
 
     if not is_valid_openai_key(api_key):
-        bot.reply_to(message, invalid_api_key) 
-        bot.register_next_step_handler(message, change_api_key_step) 
+        bot.reply_to(message, invalid_api_key)
+        bot.register_next_step_handler(message, change_api_key_step)
         return
-    insert_interaction_into_db (chat_id)        
-    logger.debug("%s" "%s", "ChatId: ", chat_id)
-    file_info = bot.get_file(message.voice.file_id)
-    file_path = file_info.file_path
+    
+    insert_interaction_into_db(chat_id)
+    logger.debug("%s %s", "ChatId: ", chat_id)
     openai.api_key = api_key
+    
+    # Determina il tipo di file e ottieni il file_path corrispondente
+    if message.content_type == 'voice':
+        file_info = bot.get_file(message.voice.file_id)
+    elif message.content_type == 'audio':
+        file_info = bot.get_file(message.audio.file_id)
+    elif message.content_type == 'document':
+        # Verifica se il documento è un file audio per estensione o MIME type
+        if message.document.mime_type.startswith('audio') or message.document.file_name.split('.')[-1] in ['mp3', 'wav', 'ogg']:
+            file_info = bot.get_file(message.document.file_id)
+        else:
+            bot.reply_to(message, wrong_file_type)
+            return
+    else:
+        # Questo caso non dovrebbe verificarsi, ma è un'ulteriore misura di sicurezza
+        bot.reply_to(message, "Tipo di file non supportato.")
+        return
 
+    file_path = file_info.file_path
     file_url = f'https://api.telegram.org/file/bot{bot_token}/{file_path}'
 
     logger.info('Downloading audio file...')
@@ -342,12 +376,16 @@ def get_voice_message(message):
             if transcript is not None and transcript.strip():
                 corrected_text = generate_corrected_transcript(0, system_prompt, transcript)
                 logger.debug(corrected_text)
-                bot.edit_message_text(chat_id=message.chat.id, message_id=sent_message.message_id, text=corrected_text)
+                message_parts = split_message(corrected_text)                
+                bot.edit_message_text(chat_id=message.chat.id, message_id=sent_message.message_id, text=message_parts[0])
+                for part in message_parts[1:]:
+                    bot.send_message(chat_id=message.chat.id, text=part)                
             else:
                 bot.edit_message_text(chat_id=message.chat.id, message_id=sent_message.message_id, text=transcription_error)
     except Exception as e:
         logger.error("%s %s", "Error transcribing audio file:", e)
-        bot.edit_message_text(chat_id=message.chat.id, message_id=sent_message.message_id, text=transcription_error)
+        transcription_error_message = f"{transcription_error} {e}"
+        bot.edit_message_text(chat_id=message.chat.id, message_id=sent_message.message_id, text=transcription_error_message)
 
     logger.info('Deleting audio file...')
     try:
