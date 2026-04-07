@@ -50,7 +50,7 @@ SPEECH_LANGUAGE_CODES = {
 }
 MONTHLY_LIMIT_SECONDS = 10 * 60
 SYNC_RECOGNIZE_LIMIT_SECONDS = 60
-SHORT_FORM_MODEL_LIMIT_SECONDS = 15
+SHORT_FORM_MODEL_LIMIT_SECONDS = 3
 TRANSCRIPTION_CHUNK_SECONDS = 50
 
 USAGE_TEXTS = {
@@ -209,9 +209,9 @@ def get_speech_model(duration_seconds):
     return "long"
 
 
-def build_speech_config(language, duration_seconds):
+def build_speech_config(language, duration_seconds, model_override=None):
     speech_language_code = get_speech_language_code(language)
-    selected_model = get_speech_model(duration_seconds)
+    selected_model = model_override or get_speech_model(duration_seconds)
     logger.info(
         "Google Speech V2 config: language=%s model=%s duration=%.2fs",
         speech_language_code,
@@ -229,10 +229,14 @@ def build_speech_config(language, duration_seconds):
     )
 
 
-def transcribe_audio_segment(audio_segment, language):
+def transcribe_audio_segment(audio_segment, language, model_override=None):
     buffer = io.BytesIO()
     audio_segment.export(buffer, format="wav")
-    config_speech = build_speech_config(language, len(audio_segment) / 1000.0)
+    config_speech = build_speech_config(
+        language,
+        len(audio_segment) / 1000.0,
+        model_override=model_override,
+    )
     request = cloud_speech.RecognizeRequest(
         recognizer=GOOGLE_RECOGNIZER,
         config=config_speech,
@@ -857,7 +861,11 @@ def handle_media_messages(message):
             chunk_duration_ms = TRANSCRIPTION_CHUNK_SECONDS * 1000
             for start_ms in range(0, len(audio), chunk_duration_ms):
                 chunk_audio = audio[start_ms:start_ms + chunk_duration_ms]
-                chunk_transcript = transcribe_audio_segment(chunk_audio, current_language)
+                chunk_transcript = transcribe_audio_segment(
+                    chunk_audio,
+                    current_language,
+                    model_override="long",
+                )
                 if chunk_transcript:
                     transcript_parts.append(chunk_transcript)
             transcript = " ".join(transcript_parts)
