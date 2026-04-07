@@ -286,6 +286,28 @@ def normalize_words_for_comparison(text):
     return re.findall(r"\w+", without_accents, flags=re.UNICODE)
 
 
+def count_words_for_prompt(text):
+    return len(re.findall(r"\w+", text or "", flags=re.UNICODE))
+
+
+def get_gemini_retry_delay_seconds(response, default_delay_seconds):
+    retry_after_header = response.headers.get("Retry-After")
+    if retry_after_header:
+        try:
+            return max(default_delay_seconds, float(retry_after_header))
+        except ValueError:
+            pass
+
+    retry_match = re.search(r"Please retry in ([0-9]+(?:\.[0-9]+)?)s", response.text or "")
+    if retry_match:
+        return max(default_delay_seconds, float(retry_match.group(1)))
+
+    if response.status_code == 429:
+        return max(default_delay_seconds, 6.0)
+
+    return default_delay_seconds
+
+
 def is_safe_gemini_post_processed_output(original_text, candidate_text):
     original_words = normalize_words_for_comparison(original_text)
     candidate_words = normalize_words_for_comparison(candidate_text)
@@ -321,21 +343,26 @@ def post_process_transcript_with_gemini(transcript, language):
     if not GEMINI_API_KEY or not cleaned_transcript:
         return cleaned_transcript
 
+    original_word_count = count_words_for_prompt(cleaned_transcript)
     prompt = (
-        "You are a punctuation and casing restorer for speech transcripts.\n"
-        "Return only the corrected transcript in the same language.\n"
-        "Do not add, remove, summarize, explain, translate, rewrite, shorten, or complete content.\n"
-        "Keep every original word in the same order.\n"
-        "Do not drop unfinished clauses or sentences.\n"
-        "Only improve punctuation, capitalization, apostrophes, and spacing.\n"
-        "If uncertain, return the input unchanged.\n"
-        "Do not add markdown or quotes.\n\n"
+        f"Italian speech transcript. Preserve exactly {original_word_count} words in the same order.\n"
+        "Do not add, remove, summarize, rewrite, shorten, or complete anything.\n"
+        "Only add punctuation, capitalization, apostrophes, and spacing.\n"
+        "If you cannot preserve exactly all words, return the input unchanged.\n"
+        "Return only plain text.\n\n"
         f"Language code: {get_speech_language_code(language)}\n"
         "Transcript:\n"
         f"{cleaned_transcript}"
     )
 
     request_payload = {
+        "system_instruction": {
+            "parts": [
+                {
+                    "text": "You are a strict punctuation restorer. Preserve every original word in order.",
+                }
+            ]
+        },
         "contents": [
             {
                 "parts": [
@@ -346,8 +373,8 @@ def post_process_transcript_with_gemini(transcript, language):
             }
         ],
         "generationConfig": {
-            "temperature": 0.1,
-            "topP": 0.8,
+            "temperature": 0,
+            "responseMimeType": "text/plain",
             "maxOutputTokens": min(8192, max(512, len(cleaned_transcript) * 2)),
         },
     }
@@ -363,10 +390,12 @@ def post_process_transcript_with_gemini(transcript, language):
                 timeout=20,
             )
             if response.status_code in (429, 500, 503) and attempt < 3:
+                retry_delay_seconds = get_gemini_retry_delay_seconds(response, retry_delay_seconds)
                 logger.warning(
-                    "Gemini post-processing temporary error %s on attempt %s/3; retrying",
+                    "Gemini post-processing temporary error %s on attempt %s/3; retrying in %.1fs",
                     response.status_code,
                     attempt,
+                    retry_delay_seconds,
                 )
                 time.sleep(retry_delay_seconds)
                 retry_delay_seconds *= 2
