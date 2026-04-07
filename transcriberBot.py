@@ -10,7 +10,8 @@ import logging
 from html import escape
 from logging.handlers import RotatingFileHandler
 from datetime import UTC, datetime
-from google.cloud import speech_v1p1beta1 as speech
+from google.cloud import speech_v2
+from google.cloud.speech_v2.types import cloud_speech
 from pydub import AudioSegment
 
 # Configura il logger
@@ -116,28 +117,19 @@ ADMIN_CHAT_ID = int(config.get("admin_chat_id", 0) or 0)
 UNLIMITED_CHAT_IDS = normalize_chat_ids(config.get("unlimited_chat_ids", []))
 if ADMIN_CHAT_ID:
     UNLIMITED_CHAT_IDS.add(ADMIN_CHAT_ID)
-GOOGLE_STORAGE_BUCKET = config.get("google_storage_bucket")
-GOOGLE_STORAGE_PREFIX = str(config.get("google_storage_prefix", "transcriber/tmp")).strip("/") or "transcriber/tmp"
-GOOGLE_STORAGE_CREDENTIALS_FILE = config.get("google_storage_credentials_file")
-GCS_ASYNC_ENABLED = bool(GOOGLE_STORAGE_BUCKET and GOOGLE_STORAGE_CREDENTIALS_FILE)
-storage_client_google = None
-client_google_gcs_async = None
 
 bot_token = config['bot_token'] 
 bot = telebot.TeleBot(bot_token)
 
-# Client Google Speech-to-Text
-client_google = speech.SpeechClient.from_service_account_file(config['google_credentials_file'])
-if GCS_ASYNC_ENABLED:
-    client_google_gcs_async = speech.SpeechClient.from_service_account_file(
-        GOOGLE_STORAGE_CREDENTIALS_FILE
-    )
-    logger.info(
-        "GCS async transcription enabled on bucket %s with separate storage and async STT credentials",
-        GOOGLE_STORAGE_BUCKET,
-    )
-else:
-    logger.info("GCS async transcription disabled; long audio will use local chunk fallback")
+with open(config['google_credentials_file'], 'r') as google_credentials_file:
+    google_credentials = json.load(google_credentials_file)
+
+GOOGLE_PROJECT_ID = google_credentials["project_id"]
+GOOGLE_RECOGNIZER = f"projects/{GOOGLE_PROJECT_ID}/locations/global/recognizers/_"
+
+# Client Google Speech-to-Text V2
+client_google = speech_v2.SpeechClient.from_service_account_file(config['google_credentials_file'])
+logger.info("Google Speech-to-Text V2 enabled for project %s", GOOGLE_PROJECT_ID)
 
 try:
     bot_info = bot.get_me()
@@ -211,121 +203,46 @@ def get_speech_language_code(language):
     return SPEECH_LANGUAGE_CODES.get(language, "en-US")
 
 
-def is_gcs_async_enabled():
-    return GCS_ASYNC_ENABLED
-
-
-def get_storage_client():
-    global storage_client_google
-    if storage_client_google is not None:
-        return storage_client_google
-
-    try:
-        from google.cloud import storage
-    except ImportError as exc:
-        raise RuntimeError(
-            "google-cloud-storage is required for Google Cloud Storage async transcription"
-        ) from exc
-
-    storage_client_google = storage.Client.from_service_account_json(
-        GOOGLE_STORAGE_CREDENTIALS_FILE
-    )
-    return storage_client_google
-
-
-def upload_file_to_gcs(local_path):
-    client_storage = get_storage_client()
-    bucket = client_storage.bucket(GOOGLE_STORAGE_BUCKET)
-    blob_name = f"{GOOGLE_STORAGE_PREFIX}/{uuid.uuid4()}.wav"
-    blob = bucket.blob(blob_name)
-    blob.upload_from_filename(local_path, content_type="audio/wav")
-    gcs_uri = f"gs://{GOOGLE_STORAGE_BUCKET}/{blob_name}"
-    logger.info("Uploaded audio to GCS: %s", gcs_uri)
-    return gcs_uri, blob_name
-
-
-def delete_gcs_blob(blob_name):
-    if not blob_name:
-        return
-    try:
-        client_storage = get_storage_client()
-        bucket = client_storage.bucket(GOOGLE_STORAGE_BUCKET)
-        bucket.blob(blob_name).delete()
-        logger.info("Deleted GCS blob: gs://%s/%s", GOOGLE_STORAGE_BUCKET, blob_name)
-    except Exception as exc:
-        logger.warning("Could not delete GCS blob %s: %s", blob_name, exc)
-
-
 def get_speech_model(duration_seconds):
     if duration_seconds <= SHORT_FORM_MODEL_LIMIT_SECONDS:
-        return "latest_short"
-    return "latest_long"
+        return "short"
+    return "long"
 
 
-def build_speech_config(language, sample_rate_hertz, duration_seconds):
+def build_speech_config(language, duration_seconds):
     speech_language_code = get_speech_language_code(language)
-    selected_sample_rate = int(sample_rate_hertz or 16000)
-    if selected_sample_rate < 8000 or selected_sample_rate > 48000:
-        logger.warning(
-            "Unsupported sample rate %s Hz detected; falling back to 16000 Hz",
-            selected_sample_rate,
-        )
-        selected_sample_rate = 16000
-
     selected_model = get_speech_model(duration_seconds)
     logger.info(
-        "Google Speech config: language=%s sample_rate=%s model=%s duration=%.2fs",
+        "Google Speech V2 config: language=%s model=%s duration=%.2fs",
         speech_language_code,
-        selected_sample_rate,
         selected_model,
         duration_seconds,
     )
-    return speech.RecognitionConfig(
-        encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-        sample_rate_hertz=selected_sample_rate,
-        language_code=speech_language_code,
+    return cloud_speech.RecognitionConfig(
+        auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
+        language_codes=[speech_language_code],
         model=selected_model,
-        enable_automatic_punctuation=True,
-        enable_spoken_punctuation=True,
+        features=cloud_speech.RecognitionFeatures(
+            enable_automatic_punctuation=True,
+            enable_spoken_punctuation=True,
+        ),
     )
 
 
 def transcribe_audio_segment(audio_segment, language):
     buffer = io.BytesIO()
     audio_segment.export(buffer, format="wav")
-    recognition_audio = speech.RecognitionAudio(content=buffer.getvalue())
-    config_speech = build_speech_config(
-        language,
-        audio_segment.frame_rate,
-        len(audio_segment) / 1000.0,
+    config_speech = build_speech_config(language, len(audio_segment) / 1000.0)
+    request = cloud_speech.RecognizeRequest(
+        recognizer=GOOGLE_RECOGNIZER,
+        config=config_speech,
+        content=buffer.getvalue(),
     )
-    response = client_google.recognize(config=config_speech, audio=recognition_audio)
+    response = client_google.recognize(request=request)
     transcript_parts = []
     for result in response.results:
         transcript_parts.append(result.alternatives[0].transcript.strip())
     return " ".join(part for part in transcript_parts if part)
-
-
-def transcribe_audio_via_gcs(local_wav_path, language, sample_rate_hertz, duration_seconds):
-    gcs_uri = None
-    blob_name = None
-    try:
-        gcs_uri, blob_name = upload_file_to_gcs(local_wav_path)
-        recognition_audio = speech.RecognitionAudio(uri=gcs_uri)
-        config_speech = build_speech_config(language, sample_rate_hertz, duration_seconds)
-        speech_client = client_google_gcs_async or client_google
-        operation = speech_client.long_running_recognize(
-            config=config_speech,
-            audio=recognition_audio,
-        )
-        timeout_seconds = max(180, int(duration_seconds * 4) + 60)
-        response = operation.result(timeout=timeout_seconds)
-        transcript_parts = []
-        for result in response.results:
-            transcript_parts.append(result.alternatives[0].transcript.strip())
-        return " ".join(part for part in transcript_parts if part)
-    finally:
-        delete_gcs_blob(blob_name)
 
 
 def format_seconds_to_hms(seconds):
@@ -931,39 +848,23 @@ def handle_media_messages(message):
                 (datetime.now(UTC) - speech_started_at).total_seconds(),
             )
         else:
-            if is_gcs_async_enabled():
-                logger.info(
-                    "Audio longer than %s seconds; using GCS async transcription with separate storage credentials",
-                    SYNC_RECOGNIZE_LIMIT_SECONDS,
-                )
-                transcript = transcribe_audio_via_gcs(
-                    wav_file_name,
-                    current_language,
-                    audio.frame_rate,
-                    duration_seconds,
-                )
-                logger.info(
-                    "Google GCS async recognition completato in %.3f secondi",
-                    (datetime.now(UTC) - speech_started_at).total_seconds(),
-                )
-            else:
-                logger.info(
-                    "Audio longer than %s seconds; splitting into %s-second chunks for local recognition",
-                    SYNC_RECOGNIZE_LIMIT_SECONDS,
-                    TRANSCRIPTION_CHUNK_SECONDS,
-                )
-                transcript_parts = []
-                chunk_duration_ms = TRANSCRIPTION_CHUNK_SECONDS * 1000
-                for start_ms in range(0, len(audio), chunk_duration_ms):
-                    chunk_audio = audio[start_ms:start_ms + chunk_duration_ms]
-                    chunk_transcript = transcribe_audio_segment(chunk_audio, current_language)
-                    if chunk_transcript:
-                        transcript_parts.append(chunk_transcript)
-                transcript = " ".join(transcript_parts)
-                logger.info(
-                    "Google chunked recognition completato in %.3f secondi",
-                    (datetime.now(UTC) - speech_started_at).total_seconds(),
-                )
+            logger.info(
+                "Audio longer than %s seconds; splitting into %s-second chunks for local recognition",
+                SYNC_RECOGNIZE_LIMIT_SECONDS,
+                TRANSCRIPTION_CHUNK_SECONDS,
+            )
+            transcript_parts = []
+            chunk_duration_ms = TRANSCRIPTION_CHUNK_SECONDS * 1000
+            for start_ms in range(0, len(audio), chunk_duration_ms):
+                chunk_audio = audio[start_ms:start_ms + chunk_duration_ms]
+                chunk_transcript = transcribe_audio_segment(chunk_audio, current_language)
+                if chunk_transcript:
+                    transcript_parts.append(chunk_transcript)
+            transcript = " ".join(transcript_parts)
+            logger.info(
+                "Google chunked recognition completato in %.3f secondi",
+                (datetime.now(UTC) - speech_started_at).total_seconds(),
+            )
 
         logger.debug(transcript)
         transcript = remove_phrases(transcript)

@@ -10,7 +10,6 @@ myenv/
 
 config.json
 google-credentials.json
-google-storage-credentials.json
 
 app.log
 app.log.*
