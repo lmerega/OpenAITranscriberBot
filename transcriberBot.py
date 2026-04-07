@@ -6,8 +6,11 @@ import uuid
 import json
 import io
 import time
+import re
+import unicodedata
 import mysql.connector
 import logging
+from difflib import SequenceMatcher
 from html import escape
 from logging.handlers import RotatingFileHandler
 from datetime import UTC, datetime
@@ -277,6 +280,42 @@ def sanitize_gemini_output(text):
     return cleaned.strip()
 
 
+def normalize_words_for_comparison(text):
+    normalized = unicodedata.normalize("NFKD", (text or "").casefold())
+    without_accents = "".join(char for char in normalized if not unicodedata.combining(char))
+    return re.findall(r"\w+", without_accents, flags=re.UNICODE)
+
+
+def is_safe_gemini_post_processed_output(original_text, candidate_text):
+    original_words = normalize_words_for_comparison(original_text)
+    candidate_words = normalize_words_for_comparison(candidate_text)
+
+    if not original_words or not candidate_words:
+        return False, "empty token sequence"
+
+    word_ratio = len(candidate_words) / len(original_words)
+    if word_ratio < 0.92 or word_ratio > 1.08:
+        return False, f"word ratio out of bounds ({word_ratio:.2f})"
+
+    text_ratio = len(candidate_text.strip()) / max(1, len(original_text.strip()))
+    if text_ratio < 0.92:
+        return False, f"text ratio too short ({text_ratio:.2f})"
+
+    head_size = min(5, len(original_words), len(candidate_words))
+    if head_size >= 3 and original_words[:head_size] != candidate_words[:head_size]:
+        return False, "leading words changed"
+
+    tail_size = min(5, len(original_words), len(candidate_words))
+    if tail_size >= 3 and original_words[-tail_size:] != candidate_words[-tail_size:]:
+        return False, "trailing words changed"
+
+    similarity = SequenceMatcher(a=original_words, b=candidate_words).ratio()
+    if similarity < 0.94:
+        return False, f"word sequence similarity too low ({similarity:.2f})"
+
+    return True, "accepted"
+
+
 def post_process_transcript_with_gemini(transcript, language):
     cleaned_transcript = (transcript or "").strip()
     if not GEMINI_API_KEY or not cleaned_transcript:
@@ -285,9 +324,11 @@ def post_process_transcript_with_gemini(transcript, language):
     prompt = (
         "You are a punctuation and casing restorer for speech transcripts.\n"
         "Return only the corrected transcript in the same language.\n"
-        "Do not add, remove, summarize, explain, translate, or rewrite content.\n"
-        "Preserve wording as much as possible.\n"
+        "Do not add, remove, summarize, explain, translate, rewrite, shorten, or complete content.\n"
+        "Keep every original word in the same order.\n"
+        "Do not drop unfinished clauses or sentences.\n"
         "Only improve punctuation, capitalization, apostrophes, and spacing.\n"
+        "If uncertain, return the input unchanged.\n"
         "Do not add markdown or quotes.\n\n"
         f"Language code: {get_speech_language_code(language)}\n"
         "Transcript:\n"
@@ -334,6 +375,10 @@ def post_process_transcript_with_gemini(transcript, language):
             response.raise_for_status()
             gemini_text = sanitize_gemini_output(extract_gemini_text(response.json()))
             if gemini_text:
+                is_safe_output, reason = is_safe_gemini_post_processed_output(cleaned_transcript, gemini_text)
+                if not is_safe_output:
+                    logger.warning("Gemini post-processing rejected: %s", reason)
+                    return cleaned_transcript
                 logger.info(
                     "Gemini post-processing applied successfully with model %s on attempt %s",
                     GEMINI_MODEL,
