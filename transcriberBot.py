@@ -121,6 +121,7 @@ GOOGLE_STORAGE_PREFIX = str(config.get("google_storage_prefix", "transcriber/tmp
 GOOGLE_STORAGE_CREDENTIALS_FILE = config.get("google_storage_credentials_file")
 GCS_ASYNC_ENABLED = bool(GOOGLE_STORAGE_BUCKET and GOOGLE_STORAGE_CREDENTIALS_FILE)
 storage_client_google = None
+client_google_gcs_async = None
 
 bot_token = config['bot_token'] 
 bot = telebot.TeleBot(bot_token)
@@ -128,8 +129,11 @@ bot = telebot.TeleBot(bot_token)
 # Client Google Speech-to-Text
 client_google = speech.SpeechClient.from_service_account_file(config['google_credentials_file'])
 if GCS_ASYNC_ENABLED:
+    client_google_gcs_async = speech.SpeechClient.from_service_account_file(
+        GOOGLE_STORAGE_CREDENTIALS_FILE
+    )
     logger.info(
-        "GCS async transcription enabled on bucket %s with separate storage credentials",
+        "GCS async transcription enabled on bucket %s with separate storage and async STT credentials",
         GOOGLE_STORAGE_BUCKET,
     )
 else:
@@ -309,7 +313,8 @@ def transcribe_audio_via_gcs(local_wav_path, language, sample_rate_hertz, durati
         gcs_uri, blob_name = upload_file_to_gcs(local_wav_path)
         recognition_audio = speech.RecognitionAudio(uri=gcs_uri)
         config_speech = build_speech_config(language, sample_rate_hertz, duration_seconds)
-        operation = client_google.long_running_recognize(
+        speech_client = client_google_gcs_async or client_google
+        operation = speech_client.long_running_recognize(
             config=config_speech,
             audio=recognition_audio,
         )
