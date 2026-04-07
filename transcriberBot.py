@@ -121,7 +121,9 @@ if ADMIN_CHAT_ID:
 bot_token = config['bot_token'] 
 bot = telebot.TeleBot(bot_token)
 GEMINI_API_KEY = config.get("gemini_api_key") or os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = config.get("gemini_model", "gemini-2.5-flash")
+if GEMINI_API_KEY and GEMINI_API_KEY.startswith(("PASTE_", "YOUR_")):
+    GEMINI_API_KEY = None
+GEMINI_MODEL = config.get("gemini_model", "gemini-3.1-flash-lite-preview")
 
 with open(config['google_credentials_file'], 'r') as google_credentials_file:
     google_credentials = json.load(google_credentials_file)
