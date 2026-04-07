@@ -1,0 +1,13 @@
+[Unit]
+Description=Telegram Audio Transcriber Bot
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/opt/telegram-audio-transcriber-bot
+ExecStart=/opt/telegram-audio-transcriber-bot/.venv/bin/python /opt/telegram-audio-transcriber-bot/transcriberBot.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

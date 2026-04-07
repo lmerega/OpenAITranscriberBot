@@ -1,0 +1,5 @@
+pyTelegramBotAPI==4.24.0
+requests==2.31.0
+mysql-connector-python==9.1.0
+google-cloud-speech==2.38.0
+pydub==0.25.1
