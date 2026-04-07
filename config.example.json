@@ -1,6 +1,9 @@
 {
   "bot_token": "TELEGRAM_BOT_TOKEN",
   "google_credentials_file": "/absolute/path/to/google-credentials.json",
+  "google_storage_credentials_file": "/absolute/path/to/google-storage-credentials.json",
+  "google_storage_bucket": "your-transcriber-temp-bucket",
+  "google_storage_prefix": "transcriber/tmp",
   "admin_chat_id": 123456789,
   "unlimited_chat_ids": [
     123456789,

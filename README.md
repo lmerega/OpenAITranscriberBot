@@ -25,8 +25,9 @@ Il core attuale del progetto e' basato su Google Speech-to-Text, con gestione qu
 ## Architettura attuale
 
 - Telegram gestisce l'ingresso dei messaggi vocali e dei file audio.
-- `ffmpeg` converte l'audio in WAV mono 16 kHz.
+- `ffmpeg` converte l'audio in WAV PCM mono preservando la frequenza di campionamento quando possibile.
 - Google Speech-to-Text esegue la trascrizione.
+- Per audio lunghi il bot puo' usare Google Cloud Storage con credenziali separate per upload temporaneo e trascrizione asincrona.
 - MySQL conserva utenti, consumo mensile e storico interazioni.
 - Il bot applica quote mensili agli utenti normali e report dettagliati all'amministratore.
 
@@ -52,6 +53,8 @@ pip install -r requirements.txt
 
 3. Copia `config.example.json` in `config.json` e inserisci i valori reali.
    `admin_chat_id` e `unlimited_chat_ids` devono restare solo nella configurazione privata locale.
+   Se vuoi la trascrizione asincrona per audio lunghi tramite bucket Google, compila anche:
+   `google_storage_credentials_file`, `google_storage_bucket`, `google_storage_prefix`.
 4. Assicurati che `ffmpeg` sia installato sul sistema.
 5. Crea il database e importa lo schema:
 
@@ -69,5 +72,15 @@ python3 transcriberBot.py
 
 - Il bot usa MySQL e si aspetta tabelle compatibili con `users`, `monthly_usage` e `interactions`.
 - `google-credentials.json` deve restare fuori da Git.
+- `google-storage-credentials.json` deve restare fuori da Git.
 - Gli ID Telegram privati non devono essere hardcodati nel codice: vanno tenuti solo in `config.json`.
 - Prima di pubblicare il progetto e' consigliato ruotare tutti i segreti gia' comparsi nei file locali.
+
+## Credenziali Google separate
+
+- `google_credentials_file`: service account usato per chiamare Google Speech-to-Text.
+- `google_storage_credentials_file`: service account separato usato solo per upload e delete dei file temporanei nel bucket.
+- Il service account di Speech-to-Text deve comunque poter leggere gli oggetti del bucket se vuoi usare l'URI `gs://...` per la trascrizione asincrona.
+- La configurazione consigliata e':
+  `google_storage_credentials_file` con permessi di scrittura/cancellazione sul bucket temporaneo.
+  `google_credentials_file` con permessi Speech-to-Text e lettura oggetti sul bucket temporaneo.
