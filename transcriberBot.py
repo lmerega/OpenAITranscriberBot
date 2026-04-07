@@ -4,6 +4,7 @@ import subprocess
 import os
 import uuid
 import json
+import io
 import mysql.connector
 import logging
 from html import escape
@@ -47,6 +48,9 @@ SPEECH_LANGUAGE_CODES = {
     "de": "de-DE",
 }
 MONTHLY_LIMIT_SECONDS = 10 * 60
+SYNC_RECOGNIZE_LIMIT_SECONDS = 60
+SHORT_FORM_MODEL_LIMIT_SECONDS = 15
+TRANSCRIPTION_CHUNK_SECONDS = 50
 
 USAGE_TEXTS = {
     "it": {
@@ -189,6 +193,56 @@ def is_unlimited_user(chat_id):
 
 def get_speech_language_code(language):
     return SPEECH_LANGUAGE_CODES.get(language, "en-US")
+
+
+def get_speech_model(duration_seconds):
+    if duration_seconds <= SHORT_FORM_MODEL_LIMIT_SECONDS:
+        return "latest_short"
+    return "latest_long"
+
+
+def build_speech_config(language, sample_rate_hertz, duration_seconds):
+    speech_language_code = get_speech_language_code(language)
+    selected_sample_rate = int(sample_rate_hertz or 16000)
+    if selected_sample_rate < 8000 or selected_sample_rate > 48000:
+        logger.warning(
+            "Unsupported sample rate %s Hz detected; falling back to 16000 Hz",
+            selected_sample_rate,
+        )
+        selected_sample_rate = 16000
+
+    selected_model = get_speech_model(duration_seconds)
+    logger.info(
+        "Google Speech config: language=%s sample_rate=%s model=%s duration=%.2fs",
+        speech_language_code,
+        selected_sample_rate,
+        selected_model,
+        duration_seconds,
+    )
+    return speech.RecognitionConfig(
+        encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+        sample_rate_hertz=selected_sample_rate,
+        language_code=speech_language_code,
+        model=selected_model,
+        enable_automatic_punctuation=True,
+        enable_spoken_punctuation=True,
+    )
+
+
+def transcribe_audio_segment(audio_segment, language):
+    buffer = io.BytesIO()
+    audio_segment.export(buffer, format="wav")
+    recognition_audio = speech.RecognitionAudio(content=buffer.getvalue())
+    config_speech = build_speech_config(
+        language,
+        audio_segment.frame_rate,
+        len(audio_segment) / 1000.0,
+    )
+    response = client_google.recognize(config=config_speech, audio=recognition_audio)
+    transcript_parts = []
+    for result in response.results:
+        transcript_parts.append(result.alternatives[0].transcript.strip())
+    return " ".join(part for part in transcript_parts if part)
 
 
 def format_seconds_to_hms(seconds):
@@ -748,7 +802,7 @@ def handle_media_messages(message):
     try:
         conversion_started_at = datetime.now(UTC)
         subprocess.run(
-            ['ffmpeg', '-y', '-i', file_name, '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', wav_file_name],
+            ['ffmpeg', '-y', '-i', file_name, '-acodec', 'pcm_s16le', '-ac', '1', wav_file_name],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -786,37 +840,31 @@ def handle_media_messages(message):
             cleanup_temp_files(file_name, wav_file_name)
             return
 
-        # Usa Google Speech-to-Text
-        with open(wav_file_name, "rb") as audio_file:
-            content = audio_file.read()
-
-        recognition_audio = speech.RecognitionAudio(content=content)
-        speech_language_code = get_speech_language_code(current_language)
-        config_speech = speech.RecognitionConfig(
-            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-            sample_rate_hertz=16000,
-            language_code=speech_language_code,
-            enable_automatic_punctuation=True,
-        )
-        logger.info("Google Speech language code: %s", speech_language_code)
-
         speech_started_at = datetime.now(UTC)
-        if duration_seconds <= 55:
-            response = client_google.recognize(config=config_speech, audio=recognition_audio)
-            logger.info("Google recognize completato in %.3f secondi", (datetime.now(UTC) - speech_started_at).total_seconds())
-        else:
-            operation = client_google.long_running_recognize(config=config_speech, audio=recognition_audio)
-            response = operation.result(timeout=180)
+        if duration_seconds <= SYNC_RECOGNIZE_LIMIT_SECONDS:
+            transcript = transcribe_audio_segment(audio, current_language)
             logger.info(
-                "Google long_running_recognize completato in %.3f secondi",
+                "Google recognize completato in %.3f secondi",
                 (datetime.now(UTC) - speech_started_at).total_seconds(),
             )
-
-        transcript_parts = []
-        for result in response.results:
-            transcript_parts.append(result.alternatives[0].transcript.strip())
-
-        transcript = " ".join(part for part in transcript_parts if part)
+        else:
+            logger.info(
+                "Audio longer than %s seconds; splitting into %s-second chunks for local recognition",
+                SYNC_RECOGNIZE_LIMIT_SECONDS,
+                TRANSCRIPTION_CHUNK_SECONDS,
+            )
+            transcript_parts = []
+            chunk_duration_ms = TRANSCRIPTION_CHUNK_SECONDS * 1000
+            for start_ms in range(0, len(audio), chunk_duration_ms):
+                chunk_audio = audio[start_ms:start_ms + chunk_duration_ms]
+                chunk_transcript = transcribe_audio_segment(chunk_audio, current_language)
+                if chunk_transcript:
+                    transcript_parts.append(chunk_transcript)
+            transcript = " ".join(transcript_parts)
+            logger.info(
+                "Google chunked recognition completato in %.3f secondi",
+                (datetime.now(UTC) - speech_started_at).total_seconds(),
+            )
 
         logger.debug(transcript)
         transcript = remove_phrases(transcript)
