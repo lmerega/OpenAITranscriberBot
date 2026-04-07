@@ -302,9 +302,6 @@ def get_gemini_retry_delay_seconds(response, default_delay_seconds):
     if retry_match:
         return max(default_delay_seconds, float(retry_match.group(1)))
 
-    if response.status_code == 429:
-        return max(default_delay_seconds, 6.0)
-
     return default_delay_seconds
 
 
@@ -389,7 +386,13 @@ def post_process_transcript_with_gemini(transcript, language):
                 json=request_payload,
                 timeout=20,
             )
-            if response.status_code in (429, 500, 503) and attempt < 3:
+            if response.status_code == 429:
+                logger.warning(
+                    "Gemini post-processing skipped due to quota/rate limit (429); using raw transcript"
+                )
+                return cleaned_transcript
+
+            if response.status_code in (500, 503) and attempt < 3:
                 retry_delay_seconds = get_gemini_retry_delay_seconds(response, retry_delay_seconds)
                 logger.warning(
                     "Gemini post-processing temporary error %s on attempt %s/3; retrying in %.1fs",
