@@ -50,7 +50,7 @@ SPEECH_LANGUAGE_CODES = {
 }
 MONTHLY_LIMIT_SECONDS = 10 * 60
 SYNC_RECOGNIZE_LIMIT_SECONDS = 60
-SHORT_FORM_MODEL_LIMIT_SECONDS = 3
+SHORT_FORM_MODEL_LIMIT_SECONDS = 15
 TRANSCRIPTION_CHUNK_SECONDS = 50
 
 USAGE_TEXTS = {
@@ -120,6 +120,8 @@ if ADMIN_CHAT_ID:
 
 bot_token = config['bot_token'] 
 bot = telebot.TeleBot(bot_token)
+GEMINI_API_KEY = config.get("gemini_api_key") or os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = config.get("gemini_model", "gemini-2.5-flash")
 
 with open(config['google_credentials_file'], 'r') as google_credentials_file:
     google_credentials = json.load(google_credentials_file)
@@ -247,6 +249,81 @@ def transcribe_audio_segment(audio_segment, language, model_override=None):
     for result in response.results:
         transcript_parts.append(result.alternatives[0].transcript.strip())
     return " ".join(part for part in transcript_parts if part)
+
+
+def extract_gemini_text(response_json):
+    candidates = response_json.get("candidates") or []
+    if not candidates:
+        return None
+
+    content = candidates[0].get("content") or {}
+    parts = content.get("parts") or []
+    text_parts = [part.get("text", "") for part in parts if part.get("text")]
+    if not text_parts:
+        return None
+    return "".join(text_parts).strip()
+
+
+def sanitize_gemini_output(text):
+    cleaned = (text or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if "\n" in cleaned:
+            cleaned = cleaned.split("\n", 1)[1]
+        cleaned = cleaned.rsplit("\n", 1)[0].strip()
+    return cleaned.strip()
+
+
+def post_process_transcript_with_gemini(transcript, language):
+    cleaned_transcript = (transcript or "").strip()
+    if not GEMINI_API_KEY or not cleaned_transcript:
+        return cleaned_transcript
+
+    prompt = (
+        "You are a punctuation and casing restorer for speech transcripts.\n"
+        "Return only the corrected transcript in the same language.\n"
+        "Do not add, remove, summarize, explain, translate, or rewrite content.\n"
+        "Preserve wording as much as possible.\n"
+        "Only improve punctuation, capitalization, apostrophes, and spacing.\n"
+        "Do not add markdown or quotes.\n\n"
+        f"Language code: {get_speech_language_code(language)}\n"
+        "Transcript:\n"
+        f"{cleaned_transcript}"
+    )
+
+    try:
+        response = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+            params={"key": GEMINI_API_KEY},
+            headers={"Content-Type": "application/json"},
+            json={
+                "contents": [
+                    {
+                        "parts": [
+                            {
+                                "text": prompt,
+                            }
+                        ]
+                    }
+                ],
+                "generationConfig": {
+                    "temperature": 0.1,
+                    "topP": 0.8,
+                    "maxOutputTokens": min(8192, max(512, len(cleaned_transcript) * 2)),
+                },
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        gemini_text = sanitize_gemini_output(extract_gemini_text(response.json()))
+        if gemini_text:
+            logger.info("Gemini post-processing applied successfully")
+            return gemini_text
+        logger.warning("Gemini post-processing returned no usable text")
+    except Exception as exc:
+        logger.warning("Gemini post-processing failed: %s", exc)
+
+    return cleaned_transcript
 
 
 def format_seconds_to_hms(seconds):
@@ -861,11 +938,7 @@ def handle_media_messages(message):
             chunk_duration_ms = TRANSCRIPTION_CHUNK_SECONDS * 1000
             for start_ms in range(0, len(audio), chunk_duration_ms):
                 chunk_audio = audio[start_ms:start_ms + chunk_duration_ms]
-                chunk_transcript = transcribe_audio_segment(
-                    chunk_audio,
-                    current_language,
-                    model_override="long",
-                )
+                chunk_transcript = transcribe_audio_segment(chunk_audio, current_language)
                 if chunk_transcript:
                     transcript_parts.append(chunk_transcript)
             transcript = " ".join(transcript_parts)
@@ -876,6 +949,7 @@ def handle_media_messages(message):
 
         logger.debug(transcript)
         transcript = remove_phrases(transcript)
+        transcript = post_process_transcript_with_gemini(transcript, current_language)
         logger.debug(transcript)
 
         # Salva utilizzo e interazione solo quando l'audio e' stato elaborato correttamente.

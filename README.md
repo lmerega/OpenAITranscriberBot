@@ -29,6 +29,7 @@ Il core attuale del progetto e' basato su Google Speech-to-Text V2, con gestione
 - Google Speech-to-Text V2 esegue la trascrizione.
 - Gli audio fino a 60 secondi vengono inviati direttamente a V2.
 - Gli audio piu' lunghi vengono spezzati localmente in chunk e trascritti in sequenza.
+- Un post-processing opzionale con Gemini puo' rifinire punteggiatura, maiuscole e spaziatura del transcript.
 - MySQL conserva utenti, consumo mensile e storico interazioni.
 - Il bot applica quote mensili agli utenti normali e report dettagliati all'amministratore.
 
@@ -54,6 +55,7 @@ pip install -r requirements.txt
 
 3. Copia `config.example.json` in `config.json` e inserisci i valori reali.
    `admin_chat_id` e `unlimited_chat_ids` devono restare solo nella configurazione privata locale.
+   Se vuoi il post-processing del testo, aggiungi anche `gemini_api_key`.
 4. Assicurati che `ffmpeg` sia installato sul sistema.
 5. Crea il database e importa lo schema:
 
@@ -73,3 +75,4 @@ python3 transcriberBot.py
 - `google-credentials.json` deve restare fuori da Git.
 - Gli ID Telegram privati non devono essere hardcodati nel codice: vanno tenuti solo in `config.json`.
 - Prima di pubblicare il progetto e' consigliato ruotare tutti i segreti gia' comparsi nei file locali.
+- Se `gemini_api_key` non e' presente, il transcript viene restituito senza post-processing.
