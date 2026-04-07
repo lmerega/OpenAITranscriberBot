@@ -76,3 +76,4 @@ python3 transcriberBot.py
 - Gli ID Telegram privati non devono essere hardcodati nel codice: vanno tenuti solo in `config.json`.
 - Prima di pubblicare il progetto e' consigliato ruotare tutti i segreti gia' comparsi nei file locali.
 - Se `gemini_api_key` non e' presente, il transcript viene restituito senza post-processing.
+- Il modello Gemini predefinito per il post-processing e' `gemini-2.5-flash`, un modello stabile.

@@ -5,6 +5,7 @@ import os
 import uuid
 import json
 import io
+import time
 import mysql.connector
 import logging
 from html import escape
@@ -123,7 +124,7 @@ bot = telebot.TeleBot(bot_token)
 GEMINI_API_KEY = config.get("gemini_api_key") or os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY and GEMINI_API_KEY.startswith(("PASTE_", "YOUR_")):
     GEMINI_API_KEY = None
-GEMINI_MODEL = config.get("gemini_model", "gemini-3.1-flash-lite-preview")
+GEMINI_MODEL = config.get("gemini_model", "gemini-2.5-flash")
 
 with open(config['google_credentials_file'], 'r') as google_credentials_file:
     google_credentials = json.load(google_credentials_file)
@@ -293,37 +294,65 @@ def post_process_transcript_with_gemini(transcript, language):
         f"{cleaned_transcript}"
     )
 
-    try:
-        response = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
-            params={"key": GEMINI_API_KEY},
-            headers={"Content-Type": "application/json"},
-            json={
-                "contents": [
+    request_payload = {
+        "contents": [
+            {
+                "parts": [
                     {
-                        "parts": [
-                            {
-                                "text": prompt,
-                            }
-                        ]
+                        "text": prompt,
                     }
-                ],
-                "generationConfig": {
-                    "temperature": 0.1,
-                    "topP": 0.8,
-                    "maxOutputTokens": min(8192, max(512, len(cleaned_transcript) * 2)),
-                },
-            },
-            timeout=20,
-        )
-        response.raise_for_status()
-        gemini_text = sanitize_gemini_output(extract_gemini_text(response.json()))
-        if gemini_text:
-            logger.info("Gemini post-processing applied successfully")
-            return gemini_text
-        logger.warning("Gemini post-processing returned no usable text")
-    except Exception as exc:
-        logger.warning("Gemini post-processing failed: %s", exc)
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.1,
+            "topP": 0.8,
+            "maxOutputTokens": min(8192, max(512, len(cleaned_transcript) * 2)),
+        },
+    }
+
+    retry_delay_seconds = 1.0
+    for attempt in range(1, 4):
+        try:
+            response = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+                params={"key": GEMINI_API_KEY},
+                headers={"Content-Type": "application/json"},
+                json=request_payload,
+                timeout=20,
+            )
+            if response.status_code in (429, 500, 503) and attempt < 3:
+                logger.warning(
+                    "Gemini post-processing temporary error %s on attempt %s/3; retrying",
+                    response.status_code,
+                    attempt,
+                )
+                time.sleep(retry_delay_seconds)
+                retry_delay_seconds *= 2
+                continue
+
+            response.raise_for_status()
+            gemini_text = sanitize_gemini_output(extract_gemini_text(response.json()))
+            if gemini_text:
+                logger.info(
+                    "Gemini post-processing applied successfully with model %s on attempt %s",
+                    GEMINI_MODEL,
+                    attempt,
+                )
+                return gemini_text
+            logger.warning("Gemini post-processing returned no usable text")
+            break
+        except Exception as exc:
+            if attempt < 3:
+                logger.warning(
+                    "Gemini post-processing failed on attempt %s/3: %s; retrying",
+                    attempt,
+                    exc,
+                )
+                time.sleep(retry_delay_seconds)
+                retry_delay_seconds *= 2
+                continue
+            logger.warning("Gemini post-processing failed: %s", exc)
 
     return cleaned_transcript
 
